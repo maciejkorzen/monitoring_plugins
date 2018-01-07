@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+
+##### DESCRIPTION ###########################################################
+# Program to check if time on local machine is synchronized with NTP servers
+# on the Internet.
+# It is wrapper around standard Nagios checks that works around their
+# limitations. For example at every run it checks random NTP servers. So if
+# one of them is down it won't affect the check result and false negatives
+# hopefully will be less frequent than with standard Nagios checks.
+#
+##### USAGE #################################################################
+# Place the check_time_mkorzen_ntp_servers file in /usr/local/etc and run
+# this script.
+#
+##### LICENSE ###############################################################
+# Copyright 2017 Maciej Korzen
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 dated June, 1991.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
+##### AUTHOR ################################################################
+# Maciej Korzen
+# maciek@korzen.org, mkorzen@gmail.com
+# http://www.korzen.org/
+
+from random import shuffle, randint
+from threading import Thread, Lock
+from pathlib import Path
+import argparse
+import os
+import re
+import subprocess
+import sys
+import time
+import traceback
+
+performance_stats = { "failed_queries": 0, "successful_time": 0.0, "successful_queries": 0 }
+ntp_servers = []
+my_threads = []
+lock1 = Lock()
+results = {}
+final_results = []
+final_return = 0
+debug = False
+ntp_servers_file = "/usr/local/etc/check_time_mkorzen_ntp_servers"
+test_timeout = 5
+ntp_check_command_path = "NONE"
+check_output = {}
+
+def load_ntp_servers_file_helper_1():
+    global ntp_servers_file
+    global ntp_servers
+    if debug:
+        print("DEBUG: load_ntp_servers_file_helper_1(): ntp_servers_file:(%s)" % (ntp_servers_file))
+    with open(ntp_servers_file, "r") as fp:
+        while 1:
+            line = fp.readline()
+            if not line:
+                break
+            line = line.rstrip()
+            if debug:
+                print("debug: load_ntp_servers_file_helper_1():(%s)" % line)
+            if re.match("^[0-9a-zA-Z\.:]+$", line):
+                ntp_servers.append(line)
+    if debug:
+        for e1 in ntp_servers:
+            print("%s" % e1)
+
+def load_ntp_servers_file():
+    if debug:
+        print("DEBUG: load_ntp_servers_file(): ntp_servers_file:(%s)" % (ntp_servers_file))
+    was_error = False
+    try:
+        load_ntp_servers_file_helper_1()
+    except:
+        sys.stdout.write("Error loading NTP servers file. Exception: " + ''.join(traceback.format_exc()).replace('\n', ' ') + "\n")
+        was_error = True
+    if was_error:
+        sys.exit(2)
+
+def do_test_server(srv1):
+    if debug:
+        print("DEBUG: do_test_server(%s)" % srv1)
+    myThreadOb1 = TestThread(srv1)
+    my_threads.append(myThreadOb1)
+    myThreadOb1.start()
+
+def test_servers_count():
+    len_servers = len(ntp_servers)
+    global final_return
+    if len_servers == 0:
+        final_results.append("No NTP servers defined!")
+        if final_return < 2:
+            final_return = 2
+        return
+
+def do_tests():
+    for e1 in ntp_servers[0:5]:
+        do_test_server(e1)
+    for e2 in my_threads:
+        e2.join()
+    test_servers_count()
+
+class TestThread(Thread):
+    def __init__(self, ntpserver1):
+        Thread.__init__(self)
+        self.ntpserver1 = ntpserver1
+        self.myprefix = 'DEBUG: TestThread; ntpserver1(%s)' % (self.ntpserver1)
+ 
+    def test_with_command(self):
+        command1 = "timeout %i %s -t 4 -H %s" % (test_timeout, ntp_check_command_path, self.ntpserver1)
+        time_start = time.time()
+        p = subprocess.Popen(
+            command1.split(),
+            stdout=subprocess.PIPE,
+            universal_newlines=True
+        )
+        command_out = p.stdout.read()
+        time_end = time.time()
+
+        if debug:
+            with lock1:
+                print("<DEBUG %s>" % (self.myprefix))
+                print("command1:(%s)" % (command1))
+                print("output:")
+                print(command_out)
+                print("</DEBUG %s>" % (self.myprefix))
+        global check_output
+        with lock1:
+            check_output[self.ntpserver1] = command_out
+            if re.match(r'^NTP OK: ', command_out):
+                performance_stats["successful_queries"] = performance_stats["successful_queries"] + 1
+                performance_stats["successful_time"] = performance_stats["successful_time"] + (time_end - time_start)
+                return "OK"
+            else:
+                performance_stats["failed_queries"] = performance_stats["failed_queries"] + 1
+                return "ERROR"
+
+    def run(self):
+        if debug:
+            print('%s: start' % (self.myprefix))
+        test_result = self.test_with_command()
+        global results
+        with lock1:
+            results[self.ntpserver1] = test_result
+        if debug:
+            print('%s: end' % (self.myprefix))
+
+def print_results_helper_1():
+    global avg_query_time
+    avg_query_time = 0
+    if performance_stats["successful_queries"] > 0:
+        avg_query_time = (performance_stats["successful_time"] / performance_stats["successful_queries"])
+    performance_stats["average_successful_query_time"] = avg_query_time
+    performance_stats2 = []
+    for e1 in sorted(performance_stats):
+        if debug:
+            print("DEBUG: performance: key(%s) val(%s)" % (str(e1), str(performance_stats[e1])))
+        uom = ''
+        str_e1 = str(e1)
+        if str_e1 == 'average_successful_query_time' or str_e1 == 'successful_time':
+            uom = 's'
+        performance_stats2.append("'%s'=%s%s;;;0;" % (e1, performance_stats[e1], uom))
+    if debug:
+        print("\nResults:")
+        print(results)
+        print("\nPerformance stats:")
+        print(performance_stats)
+    if final_return == 0:
+        if debug:
+            print("DEBUG: print_results_helper_1(): przed enumerowaniem po check_output")
+        for e1 in check_output:
+            if debug:
+                print("DEBUG: print_results_helper_1(): enumerowanie po check_output: check_output[e1]:(\n%s\n)" % (check_output[e1]))
+            if re.match(r'^NTP OK: ', check_output[e1]):
+                final_results.append(check_output[e1])
+                break
+        final_results.append("OK. Average successful query time: %.2f. | %s\n" % (avg_query_time, ' '.join(performance_stats2)))
+    for e1 in check_output:
+        out2 = ''
+        if check_output[e1] == '':
+            check_output[e1] = '\n'
+        out2 = re.sub(r"\|", "; performance data: ", check_output[e1])
+        final_results.append("%s: %s" % (e1, out2))
+    sys.stdout.write(''.join(final_results))
+
+def print_results():
+    global results
+    global performance_stats
+    global final_return
+    if performance_stats["successful_queries"] == 0:
+        final_return = 2
+    len_results = len(results)
+    if debug:
+        print("DEBUG: len(results):(%i)" % (len_results))
+    if len_results > 0:
+        was_error = False
+        try:
+            print_results_helper_1()
+        except:
+            sys.stdout.write("Error printing results. Exception: " + ''.join(traceback.format_exc()).replace('\n', ' ') + "\n")
+            was_error = True
+        if was_error:
+            sys.exit(2)
+    if debug:
+        print("DEBUG: final_return:(%i)" % (final_return))
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Check is local time is synchronized to NTP severs.")
+    parser.add_argument("--ntp-servers-file",
+                        help="Path to file with addresses of NTP servers.",
+                        type=str)
+    parser.add_argument("--test-timeout",
+                        help="Timeout for single query.",
+                        type=int,
+                        default=3)
+    parser.add_argument("--debug",
+                        help="Turn on debug.",
+                        action="store_true",
+                        default=False)
+    args = parser.parse_args()
+    global debug
+    if args.debug:
+        debug = True
+    global ntp_servers_file
+    if args.ntp_servers_file:
+        ntp_servers_file = args.ntp_servers_file
+    if debug:
+        print("DEBUG: check_time_ntp_servers:(%s)" % (ntp_servers_file))
+
+    global test_timeout
+    if args.test_timeout:
+        test_timeout = args.test_timeout
+    if debug:
+        print("DEBUG: test_timeout:(%s)" % (test_timeout))
+
+def check_ntp_servers_count():
+    if len(ntp_servers) < 5:
+        print("ERROR! I need at least 5 NTP servers to test.")
+        sys.exit(2)
+
+def detect_ntp_check_command_path():
+    candidates = [ "/usr/lib64/nagios/plugins/check_ntp", "/usr/lib64/nagios/plugins/check_ntp_time"
+            "/usr/lib/nagios/plugins/check_ntp", "/usr/lib/nagios/plugins/check_ntp_time" ]
+    global ntp_check_command_path
+    for candidate1 in candidates:
+        my_file = Path(candidate1)
+        if my_file.is_file():
+            ntp_check_command_path = candidate1
+            return
+    print("ERROR! Can't find command used for checking ntp servers!")
+    sys.exit(2)
+
+if __name__ == '__main__':
+    parse_arguments()
+    load_ntp_servers_file()
+    detect_ntp_check_command_path()
+    shuffle(ntp_servers)
+    check_ntp_servers_count()
+    do_tests()
+    print_results()
+    if debug:
+        print('Main Terminating...')
+    sys.exit(final_return)
+
+# vim: set shiftwidth=4 expandtab smarttab softtabstop=4:

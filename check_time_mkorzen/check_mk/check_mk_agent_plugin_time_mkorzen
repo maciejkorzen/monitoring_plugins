@@ -1,0 +1,33 @@
+#!/bin/bash
+
+##### DESCRIPTION ###########################################################
+# Wrapper for check_time_mkorzen. To be used with Check_MK agent as plugin.
+#
+##### USAGE #################################################################
+# Place this script in /usr/lib/check_mk_agent/plugins on server monitored by
+# Check_MK.
+# Don't forget to adjust path to check_time_mkorzen.sh.
+#
+##### LICENSE ###############################################################
+# Copyright 2017 Maciej Korzen
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 dated June, 1991.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
+##### AUTHOR ################################################################
+# Maciej Korzen
+# maciek@korzen.org, mkorzen@gmail.com
+# http://www.korzen.org/
+
+echo '<<<time_mkorzen>>>'
+exec /fix_me/adjust/this/path/check_time_mkorzen.sh
