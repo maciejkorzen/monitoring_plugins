@@ -4,6 +4,7 @@
 # Script to test if all DNS resolvers mentioned in /etc/resolv.conf
 # are working correctly.
 # It's Nagios style plugin.
+# It's multithreaded so it's faster than singlethreaded checks.
 #
 ##### USAGE #################################################################
 # Modify variables in this script and run it.
