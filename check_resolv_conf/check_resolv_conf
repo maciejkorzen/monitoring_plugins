@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+
+##### DESCRIPTION ###########################################################
+# Script to test if all DNS resolvers mentioned in /etc/resolv.conf
+# are working correctly.
+# It's Nagios style plugin.
+#
+##### USAGE #################################################################
+# Modify variables in this script and run it.
+#
+##### LICENSE ###############################################################
+# Copyright Maciej Korzen
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 dated June, 1991.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
+##### AUTHOR ################################################################
+# Maciej Korzen
+# maciek@korzen.org, mkorzen@gmail.com
+# http://www.korzen.org/
+
+from random import shuffle, randint
+from threading import Thread, Lock
+import argparse
+import os
+import re
+import subprocess
+import sys
+import time
+import traceback
+
+performance_stats = { "failed_queries": 0, "successful_time": 0.0, "successful_queries": 0 }
+testdomains = []
+dns_resolvers = []
+my_threads = []
+lock1 = Lock()
+results = {}
+final_results = []
+final_return = 0
+dns_resolvers_minimum = 2
+debug = False
+resolv_conf_file = "/etc/resolv.conf"
+check_resolv_conf_domains_file = "/etc/check_resolv_conf_domains"
+test_timeout = 10
+
+def dump_testdomains():
+    print("<dump_testdomains>")
+    for e1 in testdomains:
+        print("%s" % e1)
+    print("</dump_testdomains>")
+
+def load_resolv_conf_helper_1():
+    global resolv_conf_file
+    #test_resolv_conf_file = os.path.abspath("__file__")
+    #test_resolv_conf_file = re.sub(r"[^/]+$", "resolv.conf-fake", resolv_conf_file)
+    if debug:
+        print("DEBUG: load_resolv_conf(): resolv_conf_file:(%s)" % (resolv_conf_file))
+    with open(resolv_conf_file, "r") as fp:
+        while 1:
+            line = fp.readline()
+            if not line:
+                break
+            line = line.rstrip()
+            #print("debug: load_resolv_conf():(%s)" % line)
+            if re.match("nameserver ", line):
+                dns_resolvers.append(re.sub(r".*\s+", "", line))
+#    for e1 in dns_resolvers:
+#        print("%s" % e1)
+
+def load_resolv_conf():
+    was_error = False
+    try:
+        load_resolv_conf_helper_1()
+    except:
+        #print("Error loading resolv.conf file. Exception: ")
+        sys.stdout.write("Error loading resolv.conf file. Exception: " + ''.join(traceback.format_exc()).replace('\n', ' ') + "\n")
+        was_error = True
+    if was_error:
+        sys.exit(2)
+
+def do_test_server(srv1):
+    if debug:
+        print("DEBUG: do_test_server(%s)" % srv1)
+    for e1 in range(1, 4):
+        #print("DEBUG: do_test_server(%s): i:(%i); test domain:(%s)" % (srv1, e1, testdomains.pop(0)))
+        myThreadOb1 = TestThread(srv1, testdomains.pop(0))
+        my_threads.append(myThreadOb1)
+        myThreadOb1.start()
+
+def test_resolvers_count():
+    len_dns_resolvers = len(dns_resolvers)
+    global final_return
+    if len_dns_resolvers == 0:
+        final_results.append("No resolvers defined!")
+        if final_return < 2:
+            final_return = 2
+        return
+    if len_dns_resolvers < dns_resolvers_minimum:
+        final_results.append("Only %i resolver(s) found (%i required)." % (len_dns_resolvers, dns_resolvers_minimum))
+        if final_return < 2:
+            final_return = final_return + 1
+
+def do_tests():
+    for e1 in dns_resolvers:
+        do_test_server(e1)
+    for e2 in my_threads:
+        e2.join()
+    test_resolvers_count()
+
+class TestThread(Thread):
+    def __init__(self, resolver1, domain1):
+        Thread.__init__(self)
+        self.resolver1 = resolver1
+        self.domain1 = domain1
+        self.myprefix = 'DEBUG: TestThread; resolver1(%s); domain1:(%s)' % (self.resolver1, self.domain1)
+ 
+    def test_with_dig(self):
+        command1 = "timeout %i /usr/bin/dig +short @%s %s A" % (test_timeout, self.resolver1, self.domain1)
+        time_start = time.time()
+        p = subprocess.Popen(
+            command1.split(),
+            stdout=subprocess.PIPE,
+            universal_newlines=True
+        )
+        dig_out = p.stdout.read()
+        time_end = time.time()
+        with lock1:
+            if re.match(r'([0-9]{,3}\.){3}[0-9]{,3}\n', dig_out):
+                performance_stats["successful_queries"] = performance_stats["successful_queries"] + 1
+                performance_stats["successful_time"] = performance_stats["successful_time"] + (time_end - time_start)
+                return "OK"
+            else:
+                performance_stats["failed_queries"] = performance_stats["failed_queries"] + 1
+                return "ERROR"
+
+        #with lock1:
+            #print("<DEBUG %s>" % (self.myprefix))
+            #print("command1:(%s)" % (command1))
+            #print("output:")
+            #print(dig_out)
+            #print("</DEBUG %s>" % (self.myprefix))
+
+    def run(self):
+        if debug:
+            print('%s: start' % (self.myprefix))
+        #secondsToSleep = randint(1, 5)
+        #print('%s: sleeping for %s seconds' % (self.myprefix, secondsToSleep))
+        #time.sleep(secondsToSleep)
+        test_result = self.test_with_dig()
+        with lock1:
+            if self.resolver1 in results:
+                results[self.resolver1][self.domain1] = test_result
+            else:
+                results[self.resolver1] = { self.domain1: test_result }
+        if debug:
+            print('%s: end' % (self.myprefix))
+
+def load_domains():
+    was_error = False
+    try:
+        load_domains_helper_1()
+    except:
+        #print("Error loading resolv.conf file. Exception: ")
+        sys.stdout.write("Error loading file with domains. Exception: " + ''.join(traceback.format_exc()).replace('\n', ' ') + "\n")
+        was_error = True
+    if was_error:
+        sys.exit(2)
+
+def load_domains_helper_1():
+    with open(check_resolv_conf_domains_file, "r") as fp:
+        while 1:
+            line = fp.readline()
+            if not line:
+                break
+            line = line.rstrip()
+            #print("debug:(%s)" % line)
+            if re.match("^((?!-)[A-Za-z0-9-]{1,}(?<!-)\\.)+[A-Za-z]{2,}$", line):
+                testdomains.append(line)
+            else:
+                if debug:
+                    print("DEBUG: Skipping line '%s' as it does not match valid domain regular expression." % (line))
+
+def summarize_queries():
+    for e1 in results:
+        failed_count = 0
+        for e2 in results[e1]:
+            if results[e1][e2] == "ERROR":
+                failed_count = failed_count + 1
+        if failed_count >= 3:
+            final_results.append("Resolver %s failed." % (e1))
+            global final_return
+            if final_return < 2:
+                final_return = final_return + 1
+    
+def print_results_helper_1():
+    global avg_query_time
+    avg_query_time = (performance_stats["successful_time"] / performance_stats["successful_queries"])
+    performance_stats["average_successful_query_time"] = avg_query_time
+    performance_stats2 = []
+    for e1 in sorted(performance_stats):
+        if debug:
+            print("DEBUG: performance: key(%s) val(%s)" % (str(e1), str(performance_stats[e1])))
+        uom = ''
+        str_e1 = str(e1)
+        if str_e1 == 'average_successful_query_time' or str_e1 == 'successful_time':
+            uom = 's'
+        performance_stats2.append("'%s'=%s%s;;;0;" % (e1, performance_stats[e1], uom))
+    if debug:
+        print("\nResults:")
+        print(results)
+        print("\nPerformance stats:")
+        print(performance_stats)
+    if final_return == 0:
+        final_results.append("OK. Average successful query time: %.2f." % (avg_query_time))
+    sys.stdout.write(' '.join(final_results))
+    sys.stdout.write(' | ')
+    print(' '.join(performance_stats2))
+
+def print_results():
+    len_results = len(results)
+    if debug:
+        print("DEBUG: len(results):(%i)" % (len_results))
+    if len_results > 0:
+        was_error = False
+        try:
+            print_results_helper_1()
+        except:
+            #print("Error loading resolv.conf file. Exception: ")
+            sys.stdout.write("Error printing results. Exception: " + ''.join(traceback.format_exc()).replace('\n', ' ') + "\n")
+            was_error = True
+        if was_error:
+            sys.exit(2)
+    #print("<final_results>")
+    #global final_results
+    #print(final_results)
+    #print("</final_results>")
+    if debug:
+        print("DEBUG: final_return:(%i)" % (final_return))
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="DNS resolvers (resolv.conf) check plugin for monitoring applications.")
+    parser.add_argument("--minimal-resolvers-count",
+                        help="Minimal number of DNS resovers defined in system that is required.",
+                        type=int,
+                        default=2)
+    parser.add_argument("--domains-file",
+                        help="Path to file with domains that will be used for testing.",
+                        type=str)
+    parser.add_argument("--resolv-conf-file",
+                        help="Path to resolv.conf file.",
+                        type=str)
+    parser.add_argument("--test-timeout",
+                        help="Timeout for single query.",
+                        type=int,
+                        default=10)
+    parser.add_argument("--debug",
+                        help="Turn on debug.",
+                        action="store_true",
+                        default=False)
+    args = parser.parse_args()
+    global debug
+    if debug:
+        print("argument: --minimal-resolvers-count:(%s)" % (str(args.minimal_resolvers_count)))
+        print(parser)
+        print(args)
+    global dns_resolvers_minimum
+    if args.debug:
+        debug = True
+    if args.minimal_resolvers_count != None:
+        dns_resolvers_minimum = args.minimal_resolvers_count
+    if dns_resolvers_minimum < 1:
+        print("ERROR! Minimal count of DNS resolvers has to be > 0!")
+        sys.exit(2)
+    if debug:
+        print("DEBUG: dns_resolvers_minimum:(%s)" % (str(dns_resolvers_minimum)))
+    global resolv_conf_file
+    if args.resolv_conf_file:
+        resolv_conf_file = args.resolv_conf_file
+    global check_resolv_conf_domains_file
+    if args.domains_file:
+        check_resolv_conf_domains_file = args.domains_file
+    if debug:
+        print("DEBUG: check_resolv_conf_domains_file:(%s)" % (check_resolv_conf_domains_file))
+
+    global test_timeout
+    if args.test_timeout:
+        test_timeout = args.test_timeout
+    if debug:
+        print("DEBUG: test_timeout:(%s)" % (test_timeout))
+
+def check_domains_count():
+    needed_domains = len(dns_resolvers) * 3
+    if len(testdomains) < needed_domains:
+        print("ERROR! I need at least %i domains in file with domains to test." % (needed_domains))
+        sys.exit(2)
+
+if __name__ == '__main__':
+    parse_arguments()
+    load_domains()
+    shuffle(testdomains)
+    #dump_testdomains()
+    load_resolv_conf()
+    check_domains_count()
+    do_tests()
+    summarize_queries()
+    print_results()
+    if debug:
+        print('Main Terminating...')
+    sys.exit(final_return)
+
+# vim: set shiftwidth=4 expandtab smarttab softtabstop=4:
